@@ -820,9 +820,17 @@ extension Ghostty {
             if let candidate = URL(string: action.url), candidate.scheme != nil {
                 url = candidate
             } else {
-                // Expand ~ to the user's home directory so that file paths
-                // like ~/Documents/file.txt resolve correctly.
-                let expandedPath = NSString(string: action.url).standardizingPath
+                // Try routing a `path:line[:col]` shape through the default
+                // editor's URL scheme so the editor jumps to the location.
+                if let editorURL = editorURLForLineJump(rawPath: action.url) {
+                    NSWorkspace.shared.open(editorURL)
+                    return true
+                }
+
+                // No editor URL scheme available — strip any :line[:col]
+                // suffix so the bare file at least opens.
+                let pathForOpen = strippingLineColSuffix(action.url) ?? action.url
+                let expandedPath = NSString(string: pathForOpen).standardizingPath
                 url = URL(filePath: expandedPath)
             }
 
@@ -874,6 +882,79 @@ extension Ghostty {
             // Always report OSC 8 actions as handled. Returning false would
             // cause the core to retry with the unrestricted fallback opener.
             return true
+        }
+
+        /// VS Code family editors share the URL format:
+        ///   `<scheme>://file/<abs-path>:<line>:<col>`
+        /// If the default app for the file's extension registers any of
+        /// these schemes, we route through it so the editor jumps to the
+        /// matched location instead of just opening the file.
+        private static let lineJumpEditorSchemes: Set<String> = [
+            "vscode", "vscode-insiders",
+            "vscodium", "codium",
+            "cursor",
+            "windsurf",
+            "positron",
+            "trae",
+        ]
+
+        private static let lineColSuffixRegex: NSRegularExpression = {
+            // Anchored at end: <bare>:<line>[:<col>]
+            return try! NSRegularExpression(pattern: "^(.+?):([0-9]+)(?::([0-9]+))?$")
+        }()
+
+        private struct LineColSuffix {
+            let bare: String
+            let line: String
+            let col: String?
+        }
+
+        private static func parseLineColSuffix(_ s: String) -> LineColSuffix? {
+            let ns = s as NSString
+            let range = NSRange(location: 0, length: ns.length)
+            guard let m = lineColSuffixRegex.firstMatch(in: s, options: [], range: range) else {
+                return nil
+            }
+            let bare = ns.substring(with: m.range(at: 1))
+            let line = ns.substring(with: m.range(at: 2))
+            let colRange = m.range(at: 3)
+            let col: String? = colRange.location == NSNotFound ? nil : ns.substring(with: colRange)
+            return LineColSuffix(bare: bare, line: line, col: col)
+        }
+
+        private static func editorURLForLineJump(rawPath: String) -> URL? {
+            guard let parsed = parseLineColSuffix(rawPath) else { return nil }
+
+            let standardized = NSString(string: parsed.bare).standardizingPath
+            let ext = (standardized as NSString).pathExtension
+            guard !ext.isEmpty else { return nil }
+
+            guard let appURL = NSWorkspace.shared.defaultApplicationURL(forExtension: ext),
+                  let bundle = Bundle(url: appURL),
+                  let urlTypes = bundle.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]]
+            else {
+                return nil
+            }
+
+            let col = parsed.col ?? "1"
+            for type in urlTypes {
+                guard let schemes = type["CFBundleURLSchemes"] as? [String] else { continue }
+                for scheme in schemes where lineJumpEditorSchemes.contains(scheme) {
+                    guard let encoded = standardized.addingPercentEncoding(
+                        withAllowedCharacters: .urlPathAllowed
+                    ) else { continue }
+                    // The host is "file" and the path is the absolute path.
+                    // On macOS that path starts with "/", so the URL has
+                    // the canonical double-slash form:
+                    //   <scheme>://file//Users/...
+                    return URL(string: "\(scheme)://file/\(encoded):\(parsed.line):\(col)")
+                }
+            }
+            return nil
+        }
+
+        private static func strippingLineColSuffix(_ s: String) -> String? {
+            return parseLineColSuffix(s)?.bare
         }
 
         private static func undo(_ app: ghostty_app_t, target: ghostty_target_s) -> Bool {

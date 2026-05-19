@@ -1493,6 +1493,38 @@ link: RepeatableLink = .{},
 /// Available since: 1.2.0
 @"link-previews": LinkPreviews = .true,
 
+/// Template used to construct a URL when opening a matched file path that
+/// has a `:line` or `:line:col` suffix (the shape commonly emitted by
+/// compilers and linters, e.g. `src/foo.ts:42:10`).
+///
+/// When set, Ghostty resolves the bare path against the terminal's working
+/// directory, substitutes the absolute path and line/column into the
+/// template, and hands the result to the system opener. This lets editors
+/// such as VS Code or Cursor jump to the exact line via their URL schemes.
+///
+/// Supported placeholders:
+///
+///   * `{path}` — the absolute resolved file path
+///   * `{line}` — the line number from the suffix
+///   * `{col}`  — the column number from the suffix (1 if only `:line` was
+///     matched)
+///
+/// When the matched text has no line/column suffix, or when the bare path
+/// does not resolve to an existing file, the template is ignored and the
+/// path is opened normally.
+///
+/// Examples:
+///
+///   * `cursor://file/{path}:{line}:{col}` — Cursor
+///   * `vscode://file/{path}:{line}:{col}` — VS Code
+///
+/// Empty by default. On macOS, when empty, Ghostty inspects the default
+/// app for the file's extension and — if it registers a VS Code family
+/// URL scheme (`vscode`, `vscode-insiders`, `vscodium`, `codium`,
+/// `cursor`, `windsurf`, `positron`, `trae`) — auto-routes through it so
+/// the editor jumps to the line. Other apprts open the bare file.
+@"link-open-template": []const u8 = "",
+
 /// Whether to start the window in a maximized state. This setting applies
 /// to new windows and does not apply to tabs, splits, etc. However, this setting
 /// will apply to all new windows, not just the first one.

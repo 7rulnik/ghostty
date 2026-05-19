@@ -337,6 +337,7 @@ const DerivedConfig = struct {
     links: []DerivedConfig.Link,
     link_osc8: bool,
     link_previews: configpkg.LinkPreviews,
+    link_open_template: []const u8,
     scroll_to_bottom: configpkg.Config.ScrollToBottom,
     notify_on_command_finish: configpkg.Config.NotifyOnCommandFinish,
     notify_on_command_finish_action: configpkg.Config.NotifyOnCommandFinishAction,
@@ -417,6 +418,7 @@ const DerivedConfig = struct {
             .links = links,
             .link_osc8 = config.@"link-osc8",
             .link_previews = config.@"link-previews",
+            .link_open_template = try alloc.dupe(u8, config.@"link-open-template"),
             .scroll_to_bottom = config.@"scroll-to-bottom",
             .notify_on_command_finish = config.@"notify-on-command-finish",
             .notify_on_command_finish_action = config.@"notify-on-command-finish-action",
@@ -2092,27 +2094,218 @@ pub fn pwd(
     return try alloc.dupe(u8, terminal_pwd);
 }
 
-/// Resolves a relative file path to an absolute path using the terminal's pwd.
+/// Resolves a matched link string into a URL/path to hand to the system
+/// opener. Behaviour:
+///
+///   * If the literal string resolves to an existing file, returns the
+///     absolute path. (A file may legitimately have ":N[:M]" in its name.)
+///   * Otherwise, if the string has a trailing `:line` or `:line:col`
+///     suffix and the bare path resolves, returns either the absolute path
+///     or — when `link-open-template` is set — a URL built from that
+///     template with `{path}`, `{line}`, `{col}` substituted.
+///   * Otherwise returns null (caller falls back to the raw match).
 fn resolvePathForOpening(
     self: *Surface,
     path: []const u8,
 ) Allocator.Error!?[]const u8 {
-    if (!std.fs.path.isAbsolute(path)) {
-        const terminal_pwd = self.io.terminal.getPwd() orelse {
-            return null;
-        };
+    // Prefer the literal path — a file may legitimately have ":N[:M]" in
+    // its name, in which case we don't want to silently open a sibling.
+    if (try self.tryResolveExistingPath(path)) |resolved| return resolved;
 
-        const resolved = try std.fs.path.resolve(self.alloc, &.{ terminal_pwd, path });
+    const split = parseLineColSuffix(path) orelse return null;
+    const resolved = (try self.tryResolveExistingPath(split.bare)) orelse return null;
 
-        std.Io.Dir.accessAbsolute(global.io(), resolved, .{}) catch {
-            self.alloc.free(resolved);
-            return null;
-        };
-
-        return resolved;
+    const template = self.config.link_open_template;
+    if (template.len > 0) {
+        defer self.alloc.free(resolved);
+        return try formatLinkTemplate(
+            self.alloc,
+            template,
+            resolved,
+            split.line,
+            split.col orelse "1",
+        );
     }
 
-    return null;
+    // No template configured: preserve the line/col suffix on the absolute
+    // path so the apprt can optionally route through an editor's URL
+    // scheme (see the macOS apprt's editor auto-detection).
+    defer self.alloc.free(resolved);
+    return if (split.col) |col|
+        try std.fmt.allocPrint(self.alloc, "{s}:{s}:{s}", .{ resolved, split.line, col })
+    else
+        try std.fmt.allocPrint(self.alloc, "{s}:{s}", .{ resolved, split.line });
+}
+
+fn tryResolveExistingPath(
+    self: *Surface,
+    path: []const u8,
+) Allocator.Error!?[]const u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        std.Io.Dir.accessAbsolute(global.io(), path, .{}) catch return null;
+        return try self.alloc.dupe(u8, path);
+    }
+
+    const terminal_pwd = self.io.terminal.getPwd() orelse return null;
+    const resolved = try std.fs.path.resolve(self.alloc, &.{ terminal_pwd, path });
+    std.Io.Dir.accessAbsolute(global.io(), resolved, .{}) catch {
+        self.alloc.free(resolved);
+        return null;
+    };
+    return resolved;
+}
+
+const LineColSuffix = struct {
+    bare: []const u8,
+    line: []const u8,
+    col: ?[]const u8,
+};
+
+/// Parse a trailing `:line` or `:line:col` suffix from `path`. Returns
+/// null if there is no such suffix.
+fn parseLineColSuffix(path: []const u8) ?LineColSuffix {
+    const inner = parseTrailingColonDigits(path) orelse return null;
+    const outer = parseTrailingColonDigits(path[0..inner.before_len]) orelse {
+        return .{
+            .bare = path[0..inner.before_len],
+            .line = inner.digits,
+            .col = null,
+        };
+    };
+    return .{
+        .bare = path[0..outer.before_len],
+        .line = outer.digits,
+        .col = inner.digits,
+    };
+}
+
+const TrailingColonDigits = struct {
+    /// Length of the prefix before the matched `:digits`.
+    before_len: usize,
+    /// The digit run (non-empty).
+    digits: []const u8,
+};
+
+fn parseTrailingColonDigits(s: []const u8) ?TrailingColonDigits {
+    var i: usize = s.len;
+    while (i > 0 and std.ascii.isDigit(s[i - 1])) i -= 1;
+    if (i == s.len) return null; // no trailing digits
+    if (i == 0) return null; // all digits, no colon before them
+    if (s[i - 1] != ':') return null;
+    return .{ .before_len = i - 1, .digits = s[i..] };
+}
+
+/// Substitute `{path}`, `{line}`, `{col}` placeholders in `template`.
+/// Unknown braces and stray `{` are emitted verbatim.
+fn formatLinkTemplate(
+    alloc: Allocator,
+    template: []const u8,
+    path: []const u8,
+    line: []const u8,
+    col: []const u8,
+) Allocator.Error![]const u8 {
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer result.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < template.len) {
+        if (template[i] == '{') {
+            if (std.mem.startsWith(u8, template[i..], "{path}")) {
+                try result.appendSlice(alloc, path);
+                i += "{path}".len;
+                continue;
+            }
+            if (std.mem.startsWith(u8, template[i..], "{line}")) {
+                try result.appendSlice(alloc, line);
+                i += "{line}".len;
+                continue;
+            }
+            if (std.mem.startsWith(u8, template[i..], "{col}")) {
+                try result.appendSlice(alloc, col);
+                i += "{col}".len;
+                continue;
+            }
+        }
+        try result.append(alloc, template[i]);
+        i += 1;
+    }
+
+    return try result.toOwnedSlice(alloc);
+}
+
+test "parseLineColSuffix" {
+    const testing = std.testing;
+
+    {
+        const r = parseLineColSuffix("foo/bar.ts:42:10").?;
+        try testing.expectEqualStrings("foo/bar.ts", r.bare);
+        try testing.expectEqualStrings("42", r.line);
+        try testing.expectEqualStrings("10", r.col.?);
+    }
+    {
+        const r = parseLineColSuffix("foo/bar.ts:42").?;
+        try testing.expectEqualStrings("foo/bar.ts", r.bare);
+        try testing.expectEqualStrings("42", r.line);
+        try testing.expectEqual(@as(?[]const u8, null), r.col);
+    }
+    {
+        const r = parseLineColSuffix("spa-entry/redirects_table/table.ts:806:5").?;
+        try testing.expectEqualStrings("spa-entry/redirects_table/table.ts", r.bare);
+        try testing.expectEqualStrings("806", r.line);
+        try testing.expectEqualStrings("5", r.col.?);
+    }
+    {
+        // Three numeric segments: only the last two are the suffix.
+        const r = parseLineColSuffix("foo:1:2:3").?;
+        try testing.expectEqualStrings("foo:1", r.bare);
+        try testing.expectEqualStrings("2", r.line);
+        try testing.expectEqualStrings("3", r.col.?);
+    }
+    try testing.expectEqual(@as(?LineColSuffix, null), parseLineColSuffix("foo/bar.ts"));
+    try testing.expectEqual(@as(?LineColSuffix, null), parseLineColSuffix("foo/bar.ts:"));
+    try testing.expectEqual(@as(?LineColSuffix, null), parseLineColSuffix("foo/bar.ts:abc"));
+    try testing.expectEqual(@as(?LineColSuffix, null), parseLineColSuffix(""));
+    try testing.expectEqual(@as(?LineColSuffix, null), parseLineColSuffix("12345"));
+}
+
+test "formatLinkTemplate" {
+    const testing = std.testing;
+
+    {
+        const out = try formatLinkTemplate(
+            testing.allocator,
+            "cursor://file/{path}:{line}:{col}",
+            "/abs/foo.ts",
+            "42",
+            "10",
+        );
+        defer testing.allocator.free(out);
+        try testing.expectEqualStrings("cursor://file//abs/foo.ts:42:10", out);
+    }
+    {
+        // Stray '{' or unknown placeholders are emitted verbatim.
+        const out = try formatLinkTemplate(
+            testing.allocator,
+            "{path} {unknown} {",
+            "/abs/foo.ts",
+            "1",
+            "1",
+        );
+        defer testing.allocator.free(out);
+        try testing.expectEqualStrings("/abs/foo.ts {unknown} {", out);
+    }
+    {
+        // No placeholders present — template returned as-is.
+        const out = try formatLinkTemplate(
+            testing.allocator,
+            "static-string",
+            "/abs/foo.ts",
+            "1",
+            "1",
+        );
+        defer testing.allocator.free(out);
+        try testing.expectEqualStrings("static-string", out);
+    }
 }
 
 /// Returns the x/y coordinate of where the IME (Input Method Editor)
