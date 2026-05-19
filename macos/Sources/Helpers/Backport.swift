@@ -24,6 +24,28 @@ enum BackportKeyPressResult {
     case ignored
 }
 
+/// Phases for the backported onKeyPress handler.
+struct BackportKeyPressPhases: OptionSet {
+    let rawValue: Int
+
+    static let down = BackportKeyPressPhases(rawValue: 1 << 0)
+    static let `repeat` = BackportKeyPressPhases(rawValue: 1 << 1)
+    static let up = BackportKeyPressPhases(rawValue: 1 << 2)
+
+    static let all: BackportKeyPressPhases = [.down, .repeat, .up]
+
+    #if canImport(AppKit)
+    @available(macOS 14, *)
+    var official: KeyPress.Phases {
+        var phases: KeyPress.Phases = []
+        if contains(.down) { phases.insert(.down) }
+        if contains(.repeat) { phases.insert(.repeat) }
+        if contains(.up) { phases.insert(.up) }
+        return phases
+    }
+    #endif
+}
+
 extension Backport where Content: View {
     func pointerVisibility(_ v: BackportVisibility) -> some View {
         if #available(macOS 15, *) {
@@ -42,9 +64,16 @@ extension Backport where Content: View {
     }
 
     /// Backported onKeyPress that works on macOS 14+ and is a no-op on macOS 13.
-    func onKeyPress(_ key: KeyEquivalent, action: @escaping (EventModifiers) -> BackportKeyPressResult) -> some View {
+    /// `phases` controls whether the action fires on key down only, on
+    /// autorepeat, on key up, or some combination. Defaults to `.down` to
+    /// preserve existing call sites.
+    func onKeyPress(
+        _ key: KeyEquivalent,
+        phases: BackportKeyPressPhases = .down,
+        action: @escaping (EventModifiers) -> BackportKeyPressResult
+    ) -> some View {
         if #available(macOS 14, *) {
-            return content.onKeyPress(key, phases: .down, action: { keyPress in
+            return content.onKeyPress(key, phases: phases.official, action: { keyPress in
                 switch action(keyPress.modifiers) {
                 case .handled: return .handled
                 case .ignored: return .ignored
