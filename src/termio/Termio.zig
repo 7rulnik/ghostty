@@ -583,47 +583,31 @@ pub fn clearScreen(self: *Termio, td: *ThreadData, history: bool) !void {
         // for alt screen, we do nothing.
         if (self.terminal.screens.active_key == .alternate) return;
 
-        // Clear our selection
+        // Clear our selection and scrollback up front.
         self.terminal.screens.active.clearSelection();
-
-        // Clear our scrollback
         if (history) self.terminal.eraseDisplay(.scrollback, false);
 
-        // If we're not at a prompt, we just delete above the cursor.
-        if (!self.terminal.cursorIsAtPrompt()) {
-            if (self.terminal.screens.active.cursor.y > 0) {
-                self.terminal.screens.active.eraseActive(
-                    self.terminal.screens.active.cursor.y - 1,
-                );
-            }
-
-            // Clear all Kitty graphics state for this screen. This copies
-            // Kitty's behavior when Cmd+K deletes all Kitty graphics. I
-            // didn't spend time researching whether it only deletes Kitty
-            // graphics that are placed above the cursor or if it deletes
-            // all of them. We delete all of them for now but if this behavior
-            // isn't fully correct we should fix this later.
-            self.terminal.screens.active.kitty_images.delete(
-                self.terminal.io(),
-                self.terminal.screens.active.alloc,
-                &self.terminal,
-                .{ .all = true },
-            );
-
-            return;
-        }
-
-        // At a prompt, we want to first fully clear the screen, and then after
-        // send a FF (0x0C) to the shell so that it can repaint the screen.
-        // Mark the current row as a not a prompt so we can properly
-        // clear the full screen in the next eraseDisplay call.
-        // TODO: fix this
-        // self.terminal.markSemanticPrompt(.command);
-        // assert(!self.terminal.cursorIsAtPrompt());
+        // Unconditionally wipe the visible area. eraseDisplay(.complete) has
+        // an at-prompt heuristic that scrolls visible content into the
+        // scrollback (Kitty's behavior); we don't want that for Cmd+K, so
+        // we re-clear the scrollback right after.
         self.terminal.eraseDisplay(.complete, false);
+        if (history) self.terminal.eraseDisplay(.scrollback, false);
+
+        // Park the cursor at top-left so the shell's redraw after FF lands
+        // at row 0.
+        self.terminal.setCursorPos(1, 1);
+
+        // Clear any Kitty graphics state for this screen.
+        self.terminal.screens.active.kitty_images.delete(
+            self.terminal.io(),
+            self.terminal.screens.active.alloc,
+            &self.terminal,
+            .{ .all = true },
+        );
     }
 
-    // If we reached here it means we're at a prompt, so we send a form-feed.
+    // Tell the shell to repaint at the new cursor position.
     try self.queueWrite(td, &[_]u8{0x0C}, false);
 }
 
