@@ -7310,16 +7310,21 @@ pub const Keybinds = struct {
                 .end_search,
                 .{ .performable = true },
             );
+            // Match macOS Find conventions: Cmd+G advances forward through
+            // the buffer (downward, toward newer matches), Cmd+Shift+G goes
+            // backward. Internally, "next" walks toward older matches in the
+            // history, so the mapping is intentionally inverted at this
+            // binding layer.
             try self.set.putFlags(
                 alloc,
                 .{ .key = .{ .unicode = 'g' }, .mods = .{ .super = true } },
-                .{ .navigate_search = .next },
+                .{ .navigate_search = .previous },
                 .{ .performable = true },
             );
             try self.set.putFlags(
                 alloc,
                 .{ .key = .{ .unicode = 'g' }, .mods = .{ .super = true, .shift = true } },
-                .{ .navigate_search = .previous },
+                .{ .navigate_search = .next },
                 .{ .performable = true },
             );
 

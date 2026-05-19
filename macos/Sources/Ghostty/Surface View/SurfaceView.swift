@@ -352,7 +352,13 @@ extension Ghostty {
                     .focused($isSearchFieldFocused)
                     .overlay(alignment: .trailing) {
                         if let selected = searchState.selected {
-                            Text("\(selected + 1)/\(searchState.total, default: "?")")
+                            // Ghostty's internal idx 0 corresponds to the
+                            // newest match (bottom of buffer). Display the
+                            // counter so that 1 = oldest match (top of
+                            // buffer) and N = newest, which matches how
+                            // users read the buffer top-to-bottom.
+                            let displayIndex = (searchState.total ?? (selected + 1)) - selected
+                            Text("\(displayIndex)/\(searchState.total, default: "?")")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                                 .monospacedDigit()
@@ -378,7 +384,9 @@ extension Ghostty {
                         searchState.readPasteboardNeedle()
                     }
                     .onSubmit {
-                        _ = surfaceView.navigateSearchToNext()
+                        // Match the fork's Enter-goes-forward convention;
+                        // see the `.return` onKeyPress handler below.
+                        _ = surfaceView.navigateSearchToPrevious()
                     }
                     .onExitCommand {
                         if searchState.needle.text.isEmpty {
@@ -387,12 +395,30 @@ extension Ghostty {
                             Ghostty.moveFocus(to: surfaceView)
                         }
                     }
-                    .backport.onKeyPress(.return) { modifiers in
+                    .backport.onKeyPress(.return, phases: [.down, .repeat]) { modifiers in
+                        // Enter advances forward through the buffer (downward,
+                        // toward newer matches), which Ghostty internally calls
+                        // "previous". Shift+Enter reverses.
                         if modifiers.contains(.shift) {
+                            _ = surfaceView.navigateSearchToNext()
+                        } else {
                             _ = surfaceView.navigateSearchToPrevious()
-                            return .handled
                         }
-                        return .ignored
+                        return .handled
+                    }
+                    .backport.onKeyPress(.init("g"), phases: [.down, .repeat]) { modifiers in
+                        guard modifiers.contains(.command) else { return .ignored }
+                        if modifiers.contains(.shift) {
+                            _ = surfaceView.navigateSearchToNext()
+                        } else {
+                            _ = surfaceView.navigateSearchToPrevious()
+                        }
+                        return .handled
+                    }
+                    .backport.onKeyPress(.init("G"), phases: [.down, .repeat]) { modifiers in
+                        guard modifiers.contains(.command) else { return .ignored }
+                        _ = surfaceView.navigateSearchToNext()
+                        return .handled
                     }
 
                     Button(action: {
