@@ -21,6 +21,14 @@
   </p>
 </p>
 
+## Fork
+
+This is a personal fork with a few extra patches on top of upstream —
+cmd+click `path:line:col` jumps and macOS-aligned Find UX. See
+[FORK_CHANGES.md](FORK_CHANGES.md) for the details and the
+[`fork-main`](https://github.com/7rulnik/ghostty/tree/fork-main)
+branch.
+
 ## About
 
 Ghostty is a terminal emulator that differentiates itself by being
