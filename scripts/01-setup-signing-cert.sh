@@ -15,9 +15,13 @@ set -euo pipefail
 IDENTITY="Ghostty Fork Local"
 KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
 
-if security find-identity -v -p codesigning | grep -qF "$IDENTITY"; then
+# Match with the non-`-v` listing: a self-signed cert reports
+# CSSMERR_TP_NOT_TRUSTED, so `-v` (valid-only) never lists it and the guard
+# would keep minting duplicates that make `codesign -s` ambiguous. Untrusted is
+# fine — trust gates verification/Gatekeeper, not signing. Mirrors 03-build.sh.
+if security find-identity -p codesigning | grep -qF "$IDENTITY"; then
   echo "Code-signing identity '$IDENTITY' already exists — nothing to do."
-  security find-identity -v -p codesigning | grep -F "$IDENTITY"
+  security find-identity -p codesigning | grep -F "$IDENTITY"
   exit 0
 fi
 
@@ -47,4 +51,4 @@ security import "$tmp/cert.p12" -k "$KEYCHAIN" -P "$P12PASS" -A -T /usr/bin/code
 
 echo
 echo "Done. Code-signing identities now available:"
-security find-identity -v -p codesigning || true
+security find-identity -p codesigning | grep -F "$IDENTITY" || true
