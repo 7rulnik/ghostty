@@ -110,6 +110,8 @@ git rebase --abort
 ```
 
 After a successful rebase, rebuild + reinstall (see [Building](#building)).
+A rebase can also drag in a new `minimum_zig_version`; if the build then
+refuses your Zig, see [Keeping Zig in sync](#keeping-zig-in-sync).
 
 ## Building
 
@@ -122,8 +124,8 @@ sudo xcode-select -s /Applications/Xcode.app
 # Xcode 26+ delivers the Metal toolchain as a separate component (~700 MB)
 xcodebuild -downloadComponent MetalToolchain
 
-# Zig 0.15.x (this repo's minimum_zig_version pins 0.15.2)
-brew install zig@0.15
+# Zig — see "Keeping Zig in sync" below for why the version matters
+brew install zig
 ```
 
 Build + install (release):
@@ -131,6 +133,36 @@ Build + install (release):
 ```fish
 ./scripts/03-build.sh
 ```
+
+### Keeping Zig in sync
+
+`build.zig.zon` pins `minimum_zig_version` (currently 0.16.0), and
+`src/build/zig.zig` enforces it at comptime with an *exact* major.minor
+match — the patch may be newer, but 0.17 is rejected just as hard as
+0.15. So "install the latest Zig" is only correct while upstream happens
+to be on that minor.
+
+`scripts/03-build.sh` reads the pin out of `build.zig.zon` and finds a
+Zig that satisfies it, checking `$ZIG`, then `PATH`, then Homebrew's
+kegs. Nothing is hardcoded, so the script survives an upstream Zig bump
+without edits — it just tells you which version to go install.
+
+The manual part is Homebrew. `brew install zig` tracks the newest
+release, so a `brew upgrade` can walk *past* the pin and break the
+build even when the fork hasn't changed. When they disagree:
+
+```fish
+brew install zig@0.16          # if the versioned formula still exists
+env ZIG=/path/to/zig ./scripts/03-build.sh   # or point at any matching binary
+```
+
+Note that `/opt/homebrew/opt/zig@0.16` is a versioned *alias* symlink
+into the unversioned keg, not an independent pin — `brew upgrade zig`
+takes it with it. Only real `zig@X.Y` formulas are pins, and homebrew-core
+keeps just a few of them. If you'd rather never think about this, the
+repo's own `flake.nix` pins the exact Zig via `mitchellh/zig-overlay`
+and `.envrc` activates it through direnv, so the toolchain travels with
+the upstream commits that need it.
 
 The script runs `zig build -Doptimize=ReleaseFast`, stamps the real
 commit + build number into Info.plist (so the About window shows them
